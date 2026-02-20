@@ -8,9 +8,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
-    <!-- Preload FFmpeg core files for faster startup -->
-    <link rel="preload" href="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js" as="script" crossorigin>
-    <link rel="preload" href="https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.wasm" as="fetch" crossorigin>
+    <!-- Preload FFmpeg single-thread core for faster startup -->
+    <link rel="preload" href="https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js" as="script" crossorigin>
 
     <script type="importmap">
     {
@@ -18,8 +17,7 @@
             "react": "https://esm.sh/react@18.3.1",
             "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
             "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-            "@ffmpeg/ffmpeg": "https://esm.sh/@ffmpeg/ffmpeg@0.12.10",
-            "@ffmpeg/util": "https://esm.sh/@ffmpeg/util@0.12.1"
+            "@ffmpeg/ffmpeg": "https://esm.sh/@ffmpeg/ffmpeg@0.11.6"
         }
     }
     </script>
@@ -274,19 +272,22 @@
     <script type="module">
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
-import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg';
 
 // =============================================
-// FFmpeg Singleton — Preloads on app startup
+// FFmpeg Singleton — loads on first use
 // =============================================
-const ffmpegInstance = new FFmpeg();
+const ffmpegInstance = createFFmpeg({
+    corePath: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js',
+    mainName: 'main',
+    log: false,
+});
 let ffmpegReady = false;
 let ffmpegLoadPromise = null;
 let onProgressCallback = null;
 
-ffmpegInstance.on('progress', ({ progress }) => {
-    if (onProgressCallback) onProgressCallback(Math.min(Math.round(progress * 100), 100));
+ffmpegInstance.setProgress(({ ratio }) => {
+    if (onProgressCallback) onProgressCallback(Math.min(Math.round(ratio * 100), 100));
 });
 
 async function loadFFmpeg(onStatus) {
@@ -294,18 +295,8 @@ async function loadFFmpeg(onStatus) {
     if (ffmpegLoadPromise) return ffmpegLoadPromise;
 
     ffmpegLoadPromise = (async () => {
-        if (onStatus) onStatus('Loading FFmpeg core...');
-        const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
-        const workerURL = await toBlobURL(
-            'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/worker.js',
-            'text/javascript'
-        );
-        if (onStatus) onStatus('Loading WebAssembly...');
-        await ffmpegInstance.load({
-            coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-            wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm'),
-            classWorkerURL: workerURL,
-        });
+        if (onStatus) onStatus('Loading engine...');
+        await ffmpegInstance.load();
         ffmpegReady = true;
         if (onStatus) onStatus('Ready');
     })();
@@ -362,7 +353,7 @@ const ALL_TOOLS = [
 async function processWithFFmpeg(file, toolId, settings) {
     const ext = getExt(file.name);
     const inputName = 'input' + ext;
-    await ffmpegInstance.writeFile(inputName, await fetchFile(file));
+    ffmpegInstance.FS('writeFile', inputName, await fetchFile(file));
 
     let args, outputName;
 
@@ -470,8 +461,8 @@ async function processWithFFmpeg(file, toolId, settings) {
             throw new Error('Tool not supported yet');
     }
 
-    await ffmpegInstance.exec(args);
-    const data = await ffmpegInstance.readFile(outputName);
+    await ffmpegInstance.run(...args);
+    const data = ffmpegInstance.FS('readFile', outputName);
 
     let mime = 'video/mp4';
     if (outputName.endsWith('.mp3')) mime = 'audio/mpeg';
@@ -480,8 +471,8 @@ async function processWithFFmpeg(file, toolId, settings) {
     else if (outputName.endsWith('.avi')) mime = 'video/avi';
 
     // Clean up
-    try { await ffmpegInstance.deleteFile(inputName); } catch(e) {}
-    try { await ffmpegInstance.deleteFile(outputName); } catch(e) {}
+    try { ffmpegInstance.FS('unlink', inputName); } catch(e) {}
+    try { ffmpegInstance.FS('unlink', outputName); } catch(e) {}
 
     return { blob: new Blob([data.buffer], { type: mime }), filename: outputName, mime };
 }
